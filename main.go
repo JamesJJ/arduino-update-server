@@ -23,6 +23,9 @@ func main() {
 	clientLog := flag.String("client-log", "", "Path to client log file")
 	flag.Parse()
 
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		handleOTA(w, r, *root, *noParseVersion, *clientLog)
 	})
