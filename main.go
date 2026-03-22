@@ -18,10 +18,16 @@ import (
 
 func main() {
 	port := flag.Int("port", 8080, "HTTP port to listen on")
-	root := flag.String("root", ".", "Root directory for firmware files")
+	root := flag.String("root", "", "Root directory for firmware files (required)")
 	noParseVersion := flag.Bool("no-parse-version", false, "Disable parsing version from __DATE__ __TIME__ format")
 	clientLog := flag.String("client-log", "", "Path to client log file")
 	flag.Parse()
+
+	if *root == "" {
+		fmt.Fprintln(os.Stderr, "Error: --root is required")
+		flag.Usage()
+		os.Exit(1)
+	}
 
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -55,22 +61,30 @@ func sanitizeVersion(raw string) string {
 	return s
 }
 
-var months = map[string]string{
-	"jan": "01", "feb": "02", "mar": "03", "apr": "04",
-	"may": "05", "jun": "06", "jul": "07", "aug": "08",
-	"sep": "09", "oct": "10", "nov": "11", "dec": "12",
-}
+var filenameSanitizeRe = regexp.MustCompile(`[^a-zA-Z0-9._-]`)
 
-// parseDateTime converts "__DATE__ __TIME__" (e.g. "Mar 21 2026 18:28:18") to "20260321-182818"
-func parseDateTime(raw string) string {
-	t, err := time.Parse("Jan  2 2006 15:04:05", raw)
-	if err != nil {
-		t, err = time.Parse("Jan 2 2006 15:04:05", raw)
-		if err != nil {
-			return ""
+// parseVersion handles the "|D:...|T:...|<optional>" format.
+// Returns parsed "yyyymmdd-hhmmss[-sanitized-suffix]" or falls back to sanitized filename.
+func parseVersion(raw string, parse bool) string {
+	if parse && strings.HasPrefix(raw, "|D:") {
+		parts := strings.SplitN(raw[1:], "|", 3) // "D:...", "T:...", optional
+		if len(parts) >= 2 && strings.HasPrefix(parts[0], "D:") && strings.HasPrefix(parts[1], "T:") {
+			dt := parts[0][2:] + " " + parts[1][2:]
+			t, err := time.Parse("Jan  2 2006 15:04:05", dt)
+			if err != nil {
+				t, err = time.Parse("Jan 2 2006 15:04:05", dt)
+			}
+			if err == nil {
+				result := t.Format("20060102-150405")
+				if len(parts) == 3 && parts[2] != "" {
+					s := filenameSanitizeRe.ReplaceAllString(parts[2], "-")
+					result += "-" + s
+				}
+				return result
+			}
 		}
 	}
-	return t.Format("20060102-150405")
+	return sanitizeVersion(raw)
 }
 
 func clientIP(r *http.Request) string {
@@ -101,13 +115,7 @@ func handleOTA(w http.ResponseWriter, r *http.Request, root string, noParseVersi
 	}
 
 	sanitizedMAC := sanitizeMAC(mac)
-	sanitizedVersion := sanitizeVersion(version)
-
-	if !noParseVersion {
-		if parsed := parseDateTime(version); parsed != "" {
-			sanitizedVersion = parsed
-		}
-	}
+	sanitizedVersion := parseVersion(version, !noParseVersion)
 
 	dir := filepath.Join(root, sanitizedMAC)
 	log.Printf("[%s] Search dir=%s, current version=%s", ip, dir, sanitizedVersion)
