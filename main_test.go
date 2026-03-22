@@ -293,3 +293,19 @@ func TestHandleMetrics_NoLog(t *testing.T) {
 		t.Errorf("expected 503, got %d", w.Code)
 	}
 }
+
+func TestHandleMetrics_MissingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nonexistent.tsv")
+	w := httptest.NewRecorder()
+	handleMetrics(w, path)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var m map[string]int
+	json.NewDecoder(w.Body).Decode(&m)
+	for _, key := range []string{"total_clients", "offered_update", "up_to_date", "apparently_failing"} {
+		if m[key] != 0 {
+			t.Errorf("%s = %d, want 0", key, m[key])
+		}
+	}
+}

@@ -278,7 +278,7 @@ func readClientLog(path string) []clientRecord {
 
 	f, err := os.Open(path)
 	if err != nil {
-		return nil
+		return []clientRecord{}
 	}
 	defer f.Close()
 
