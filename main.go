@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"log"
@@ -11,6 +12,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -18,10 +20,11 @@ func main() {
 	port := flag.Int("port", 8080, "HTTP port to listen on")
 	root := flag.String("root", ".", "Root directory for firmware files")
 	noParseVersion := flag.Bool("no-parse-version", false, "Disable parsing version from __DATE__ __TIME__ format")
+	clientLog := flag.String("client-log", "", "Path to client log file")
 	flag.Parse()
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		handleOTA(w, r, *root, *noParseVersion)
+		handleOTA(w, r, *root, *noParseVersion, *clientLog)
 	})
 
 	addr := fmt.Sprintf(":%d", *port)
@@ -75,7 +78,7 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
-func handleOTA(w http.ResponseWriter, r *http.Request, root string, noParseVersion bool) {
+func handleOTA(w http.ResponseWriter, r *http.Request, root string, noParseVersion bool, clientLog string) {
 	ip := clientIP(r)
 
 	// Log all x-ESP8266-* headers
@@ -109,6 +112,7 @@ func handleOTA(w http.ResponseWriter, r *http.Request, root string, noParseVersi
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		log.Printf("[%s] Cannot read directory %s: %v", ip, dir, err)
+		writeClientLog(clientLog, sanitizedMAC, ip, version, "<NONE>")
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
@@ -126,6 +130,7 @@ func handleOTA(w http.ResponseWriter, r *http.Request, root string, noParseVersi
 
 	if len(candidates) == 0 {
 		log.Printf("[%s] No update available (0 candidates)", ip)
+		writeClientLog(clientLog, sanitizedMAC, ip, version, "<NONE>")
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
@@ -133,6 +138,7 @@ func handleOTA(w http.ResponseWriter, r *http.Request, root string, noParseVersi
 	sort.Strings(candidates)
 	selected := candidates[0]
 	log.Printf("[%s] Selected update=%s, skipped=%d newer versions", ip, selected, len(candidates)-1)
+	writeClientLog(clientLog, sanitizedMAC, ip, version, selected)
 
 	filePath := filepath.Join(dir, selected)
 	f, err := os.Open(filePath)
@@ -153,4 +159,55 @@ func handleOTA(w http.ResponseWriter, r *http.Request, root string, noParseVersi
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", info.Size()))
 	http.ServeContent(w, r, selected, info.ModTime(), f)
+}
+
+var controlRe = regexp.MustCompile(`[\x00-\x1f\x7f]`)
+
+func stripControl(s string) string {
+	return controlRe.ReplaceAllString(s, "")
+}
+
+var clientLogMu sync.Mutex
+
+func writeClientLog(path, mac, ip, version, offered string) {
+	if path == "" {
+		return
+	}
+	now := time.Now().UTC().Format("20060102-150405")
+	newLine := mac + "\t" + now + "\t" + ip + "\t" + stripControl(version) + "\t" + offered
+
+	clientLogMu.Lock()
+	defer clientLogMu.Unlock()
+
+	lines := map[string]string{}
+	var order []string
+
+	if f, err := os.Open(path); err == nil {
+		sc := bufio.NewScanner(f)
+		for sc.Scan() {
+			line := sc.Text()
+			if key, _, ok := strings.Cut(line, "\t"); ok && key != "" {
+				if _, exists := lines[key]; !exists {
+					order = append(order, key)
+				}
+				lines[key] = line
+			}
+		}
+		f.Close()
+	}
+
+	if _, exists := lines[mac]; !exists {
+		order = append(order, mac)
+	}
+	lines[mac] = newLine
+
+	var buf strings.Builder
+	for _, key := range order {
+		buf.WriteString(lines[key])
+		buf.WriteByte('\n')
+	}
+
+	if err := os.WriteFile(path, []byte(buf.String()), 0644); err != nil {
+		log.Printf("Failed to write client log: %v", err)
+	}
 }

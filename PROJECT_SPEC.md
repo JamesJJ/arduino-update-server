@@ -9,6 +9,7 @@ A lightweight HTTP server written in Go that serves OTA firmware updates to ESP8
 | `--port` | `8080` | HTTP listen port |
 | `--root` | `.` | Root directory containing firmware files |
 | `--no-parse-version` | `false` | Disable parsing `__DATE__ __TIME__` format from the version header |
+| `--client-log` | _(disabled)_ | Path to a TSV file recording the latest request from each client |
 
 ## How It Works
 
@@ -20,6 +21,16 @@ A lightweight HTTP server written in Go that serves OTA firmware updates to ESP8
 6. If no newer version exists, the server responds with HTTP 304.
 
 All `x-ESP8266-*` request headers, the resolved directory, current version, selected file, and skipped version count are logged to stdout.
+
+## Client Log
+
+When `--client-log` is set, the server maintains a TSV file with one line per known client, keyed by sanitized MAC address. Each line contains:
+
+```
+<sanitized-mac>\t<YYYYMMDD-hhmmss>\t<client-ip>\t<version>\t<offered-file or <NONE>>
+```
+
+Subsequent requests from the same MAC overwrite that client's existing line. The version column is the raw `x-ESP8266-version` header value with control characters stripped.
 
 ## Example Arduino Client
 
