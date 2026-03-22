@@ -1,0 +1,44 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.21"
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Set tag
+        id: tag
+        run: |
+          TAG="v0.$(date -u +'%Y%m%d.%H%M%S')"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Build binaries
+        run: |
+          GOOS=linux GOARCH=amd64 go build -o arduino-update-server-linux-amd64
+          GOOS=linux GOARCH=arm64 go build -o arduino-update-server-linux-arm64
+
+      - name: Create tag and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git tag "${{ steps.tag.outputs.tag }}"
+          git push origin "${{ steps.tag.outputs.tag }}"
+          gh release create "${{ steps.tag.outputs.tag }}" \
+            --title "${{ steps.tag.outputs.tag }}" \
+            --generate-notes \
+            arduino-update-server-linux-amd64 \
+            arduino-update-server-linux-arm64
