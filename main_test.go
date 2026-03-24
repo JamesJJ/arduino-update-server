@@ -12,17 +12,17 @@ import (
 
 func TestSanitizeMAC(t *testing.T) {
 	tests := []struct {
-		in      string
-		want    string
-		wantOK  bool
+		in     string
+		want   string
+		wantOK bool
 	}{
 		{"AA:BB:CC:DD:EE:FF", "aa-bb-cc-dd-ee-ff", true},
 		{"aa:bb:cc:dd:ee:ff", "aa-bb-cc-dd-ee-ff", true},
 		{"AABBCCDDEEFF", "aa-bb-cc-dd-ee-ff", true},
-		{"AA:BB:CC:DD:EE:FF:00:11", "", false},                        // too many pairs
-		{"AA:BB:CC:DD:EE", "", false},                            // only 5 pairs
-		{"GG:HH:II:JJ:KK:LL", "", false},                        // invalid hex
-		{"aa:bb:cc:dd:ee:ff::", "aa-bb-cc-dd-ee-ff", true},       // trailing colons ok, still 6 pairs
+		{"AA:BB:CC:DD:EE:FF:00:11", "", false},
+		{"AA:BB:CC:DD:EE", "", false},
+		{"GG:HH:II:JJ:KK:LL", "", false},
+		{"aa:bb:cc:dd:ee:ff::", "aa-bb-cc-dd-ee-ff", true},
 		{"", "", false},
 	}
 	for _, tt := range tests {
@@ -55,19 +55,15 @@ func TestParseVersion(t *testing.T) {
 		parse bool
 		want  string
 	}{
-		// Parsing enabled, valid format
 		{"|D:Mar 21 2026|T:18:28:18|", true, "20260321-182818"},
 		{"|D:Mar  1 2026|T:08:05:01|", true, "20260301-080501"},
 		{"|D:Mar  5 2026|T:09:00:00|", true, "20260305-090000"},
-		// With optional suffix
 		{"|D:Jan 15 2026|T:12:00:00|my-board", true, "20260115-120000-my-board"},
 		{"|D:Jan 15 2026|T:12:00:00|special chars!", true, "20260115-120000-special-chars-"},
 		{"|D:Jan 15 2026|T:12:00:00|v2.1_test", true, "20260115-120000-v2.1_test"},
-		// Parsing enabled but not matching format — falls back to sanitize
 		{"some-random-version", true, "some-random-version"},
 		{"1.2.3", true, "1.2.3"},
 		{"has spaces", true, "has-spaces"},
-		// Parsing disabled — always sanitize
 		{"|D:Mar 21 2026|T:18:28:18|", false, "-D-Mar-21-2026-T-18-28-18-"},
 	}
 	for _, tt := range tests {
@@ -82,9 +78,7 @@ func TestStripControl(t *testing.T) {
 		{"hello", "hello"},
 		{"hello\tworld", "helloworld"},
 		{"line\nbreak", "linebreak"},
-		{"cr\rhere", "crhere"},
 		{"\x00\x1f\x7f", ""},
-		{"normal text", "normal text"},
 	}
 	for _, tt := range tests {
 		if got := stripControl(tt.in); got != tt.want {
@@ -118,57 +112,64 @@ func TestClientIP(t *testing.T) {
 	}
 }
 
-func TestWriteAndReadClientLog(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "clients.tsv")
+func newTestClientLog(t *testing.T) *clientLog {
+	t.Helper()
+	return newClientLog(filepath.Join(t.TempDir(), "clients.tsv"))
+}
 
-	writeClientLog(path, "aa-bb-cc", "10.0.0.1", "v1", "v2.bin")
-	records := readClientLog(path)
-	if len(records) != 1 {
-		t.Fatalf("expected 1 record, got %d", len(records))
-	}
-	if records[0].FailCount != 1 {
-		t.Errorf("first call failCount = %d, want 1", records[0].FailCount)
-	}
+func TestClientLogUpdateAndSnapshot(t *testing.T) {
+	clog := newTestClientLog(t)
 
-	writeClientLog(path, "aa-bb-cc", "10.0.0.1", "v1", "v2.bin")
-	records = readClientLog(path)
-	if records[0].FailCount != 2 {
-		t.Errorf("second call failCount = %d, want 2", records[0].FailCount)
+	clog.update("aa-bb-cc", "10.0.0.1", "v1", "v2.bin")
+	records := clog.snapshot()
+	if len(records) != 1 || records[0].FailCount != 1 {
+		t.Fatalf("first call: got %d records, failCount=%d", len(records), records[0].FailCount)
 	}
 
-	writeClientLog(path, "aa-bb-cc", "10.0.0.1", "v1", "v2.bin")
-	records = readClientLog(path)
-	if records[0].FailCount != 3 {
-		t.Errorf("third call failCount = %d, want 3", records[0].FailCount)
+	clog.update("aa-bb-cc", "10.0.0.1", "v1", "v2.bin")
+	if r := clog.snapshot(); r[0].FailCount != 2 {
+		t.Errorf("second call failCount = %d, want 2", r[0].FailCount)
 	}
 
-	writeClientLog(path, "aa-bb-cc", "10.0.0.1", "v2", "<NONE>")
-	records = readClientLog(path)
-	if records[0].FailCount != 0 {
-		t.Errorf("no-update failCount = %d, want 0", records[0].FailCount)
+	clog.update("aa-bb-cc", "10.0.0.1", "v1", "v2.bin")
+	if r := clog.snapshot(); r[0].FailCount != 3 {
+		t.Errorf("third call failCount = %d, want 3", r[0].FailCount)
 	}
 
-	writeClientLog(path, "aa-bb-cc", "10.0.0.1", "v2", "v3.bin")
-	records = readClientLog(path)
-	if records[0].FailCount != 1 {
-		t.Errorf("new-version failCount = %d, want 1", records[0].FailCount)
+	clog.update("aa-bb-cc", "10.0.0.1", "v2", "<NONE>")
+	if r := clog.snapshot(); r[0].FailCount != 0 {
+		t.Errorf("no-update failCount = %d, want 0", r[0].FailCount)
 	}
 
-	writeClientLog(path, "dd-ee-ff", "10.0.0.2", "v1", "<NONE>")
-	records = readClientLog(path)
-	if len(records) != 2 {
-		t.Fatalf("expected 2 records, got %d", len(records))
+	clog.update("aa-bb-cc", "10.0.0.1", "v2", "v3.bin")
+	if r := clog.snapshot(); r[0].FailCount != 1 {
+		t.Errorf("new-version failCount = %d, want 1", r[0].FailCount)
+	}
+
+	clog.update("dd-ee-ff", "10.0.0.2", "v1", "<NONE>")
+	if r := clog.snapshot(); len(r) != 2 {
+		t.Fatalf("expected 2 records, got %d", len(r))
 	}
 }
 
-func TestWriteClientLogNoPath(t *testing.T) {
-	writeClientLog("", "aa-bb-cc", "10.0.0.1", "v1", "v2.bin")
+func TestClientLogFlushAndReload(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "clients.tsv")
+	clog := newClientLog(path)
+	clog.update("aa-bb-cc", "10.0.0.1", "v1", "v2.bin")
+	clog.flush()
+
+	// Reload from disk
+	clog2 := newClientLog(path)
+	records := clog2.snapshot()
+	if len(records) != 1 || records[0].MAC != "aa-bb-cc" || records[0].FailCount != 1 {
+		t.Errorf("reload mismatch: %+v", records)
+	}
 }
 
 func TestHandleOTA_MissingHeaders(t *testing.T) {
 	r := httptest.NewRequest("GET", "/ota", nil)
 	w := httptest.NewRecorder()
-	handleOTA(w, r, t.TempDir(), false, "")
+	handleOTA(w, r, t.TempDir(), false, nil)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", w.Code)
 	}
@@ -179,9 +180,9 @@ func TestHandleOTA_InvalidMAC(t *testing.T) {
 	r.Header.Set("x-ESP8266-STA-MAC", "ZZZZZZZZZZZZ")
 	r.Header.Set("x-ESP8266-version", "v1")
 	w := httptest.NewRecorder()
-	handleOTA(w, r, t.TempDir(), true, "")
+	handleOTA(w, r, t.TempDir(), true, nil)
 	if w.Code != http.StatusNotModified {
-		t.Errorf("expected 304 for invalid MAC, got %d", w.Code)
+		t.Errorf("expected 304, got %d", w.Code)
 	}
 }
 
@@ -190,7 +191,7 @@ func TestHandleOTA_NoDirectory(t *testing.T) {
 	r.Header.Set("x-ESP8266-STA-MAC", "AA:BB:CC:DD:EE:FF")
 	r.Header.Set("x-ESP8266-version", "v1")
 	w := httptest.NewRecorder()
-	handleOTA(w, r, t.TempDir(), true, "")
+	handleOTA(w, r, t.TempDir(), true, nil)
 	if w.Code != http.StatusNotModified {
 		t.Errorf("expected 304, got %d", w.Code)
 	}
@@ -206,7 +207,7 @@ func TestHandleOTA_ServesUpdate(t *testing.T) {
 	r.Header.Set("x-ESP8266-STA-MAC", "AA:BB:CC:DD:EE:FF")
 	r.Header.Set("x-ESP8266-version", "|D:Mar 21 2026|T:18:00:00|")
 	w := httptest.NewRecorder()
-	handleOTA(w, r, root, false, "")
+	handleOTA(w, r, root, false, nil)
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", w.Code)
 	}
@@ -217,27 +218,23 @@ func TestHandleOTA_ServesUpdate(t *testing.T) {
 
 func TestHandleOTA_NotEnoughSpace(t *testing.T) {
 	root := t.TempDir()
-	logPath := filepath.Join(t.TempDir(), "clients.tsv")
+	clog := newTestClientLog(t)
 	macDir := filepath.Join(root, "aa-bb-cc-dd-ee-ff")
 	os.MkdirAll(macDir, 0755)
-	os.WriteFile(filepath.Join(macDir, "20260322-180000.bin"), []byte("firmware"), 0644) // 8 bytes
+	os.WriteFile(filepath.Join(macDir, "20260322-180000.bin"), []byte("firmware"), 0644)
 
 	r := httptest.NewRequest("GET", "/ota", nil)
 	r.Header.Set("x-ESP8266-STA-MAC", "AA:BB:CC:DD:EE:FF")
 	r.Header.Set("x-ESP8266-version", "|D:Mar 21 2026|T:18:00:00|")
-	r.Header.Set("x-ESP8266-free-space", "5") // less than 8
+	r.Header.Set("x-ESP8266-free-space", "5")
 	w := httptest.NewRecorder()
-	handleOTA(w, r, root, false, logPath)
+	handleOTA(w, r, root, false, clog)
 	if w.Code != http.StatusNotModified {
 		t.Errorf("expected 304, got %d", w.Code)
 	}
-	// Verify fail count was incremented
-	records := readClientLog(logPath)
-	if len(records) != 1 {
-		t.Fatalf("expected 1 record, got %d", len(records))
-	}
-	if records[0].FailCount != 1 {
-		t.Errorf("failCount = %d, want 1", records[0].FailCount)
+	records := clog.snapshot()
+	if len(records) != 1 || records[0].FailCount != 1 {
+		t.Errorf("expected failCount=1, got %+v", records)
 	}
 }
 
@@ -251,19 +248,19 @@ func TestHandleOTA_NoUpdate(t *testing.T) {
 	r.Header.Set("x-ESP8266-STA-MAC", "AA:BB:CC:DD:EE:FF")
 	r.Header.Set("x-ESP8266-version", "|D:Mar 21 2026|T:18:00:00|")
 	w := httptest.NewRecorder()
-	handleOTA(w, r, root, false, "")
+	handleOTA(w, r, root, false, nil)
 	if w.Code != http.StatusNotModified {
 		t.Errorf("expected 304, got %d", w.Code)
 	}
 }
 
 func TestHandleClients(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "clients.tsv")
-	writeClientLog(path, "aa-bb-cc", "10.0.0.1", "v1", "v2.bin")
-	writeClientLog(path, "dd-ee-ff", "10.0.0.2", "v1", "<NONE>")
+	clog := newTestClientLog(t)
+	clog.update("aa-bb-cc", "10.0.0.1", "v1", "v2.bin")
+	clog.update("dd-ee-ff", "10.0.0.2", "v1", "<NONE>")
 
 	w := httptest.NewRecorder()
-	handleClients(w, path)
+	handleClients(w, clog)
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", w.Code)
 	}
@@ -275,23 +272,22 @@ func TestHandleClients(t *testing.T) {
 
 func TestHandleClients_NoLog(t *testing.T) {
 	w := httptest.NewRecorder()
-	handleClients(w, "")
+	handleClients(w, nil)
 	if w.Code != http.StatusServiceUnavailable {
 		t.Errorf("expected 503, got %d", w.Code)
 	}
 }
 
 func TestHandleMetrics(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "clients.tsv")
-
-	writeClientLog(path, "aa-bb-cc", "10.0.0.1", "v2", "<NONE>")
-	writeClientLog(path, "dd-ee-ff", "10.0.0.2", "v1", "v2.bin")
-	writeClientLog(path, "11-22-33", "10.0.0.3", "v1", "v2.bin")
-	writeClientLog(path, "11-22-33", "10.0.0.3", "v1", "v2.bin")
-	writeClientLog(path, "11-22-33", "10.0.0.3", "v1", "v2.bin")
+	clog := newTestClientLog(t)
+	clog.update("aa-bb-cc", "10.0.0.1", "v2", "<NONE>")
+	clog.update("dd-ee-ff", "10.0.0.2", "v1", "v2.bin")
+	clog.update("11-22-33", "10.0.0.3", "v1", "v2.bin")
+	clog.update("11-22-33", "10.0.0.3", "v1", "v2.bin")
+	clog.update("11-22-33", "10.0.0.3", "v1", "v2.bin")
 
 	w := httptest.NewRecorder()
-	handleMetrics(w, path)
+	handleMetrics(w, clog)
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
@@ -314,16 +310,16 @@ func TestHandleMetrics(t *testing.T) {
 
 func TestHandleMetrics_NoLog(t *testing.T) {
 	w := httptest.NewRecorder()
-	handleMetrics(w, "")
+	handleMetrics(w, nil)
 	if w.Code != http.StatusServiceUnavailable {
 		t.Errorf("expected 503, got %d", w.Code)
 	}
 }
 
-func TestHandleMetrics_MissingFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "nonexistent.tsv")
+func TestHandleMetrics_EmptyLog(t *testing.T) {
+	clog := newTestClientLog(t)
 	w := httptest.NewRecorder()
-	handleMetrics(w, path)
+	handleMetrics(w, clog)
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}

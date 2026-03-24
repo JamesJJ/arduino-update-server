@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -9,12 +10,14 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -22,7 +25,8 @@ func main() {
 	port := flag.Int("port", 8080, "HTTP port to listen on")
 	root := flag.String("root", "", "Root directory for firmware files (required)")
 	noParseVersion := flag.Bool("no-parse-version", false, "Disable parsing version from __DATE__ __TIME__ format")
-	clientLog := flag.String("client-log", "", "Path to client log file")
+	clientLogPath := flag.String("client-log", "", "Path to client log file")
+	flushCadence := flag.Int("flush-log-cadence", 60, "Seconds between client log flushes to disk")
 	flag.Parse()
 
 	if *root == "" {
@@ -31,29 +35,49 @@ func main() {
 		os.Exit(1)
 	}
 
+	var clog *clientLog
+	if *clientLogPath != "" {
+		clog = newClientLog(*clientLogPath)
+		go clog.flushLoop(time.Duration(*flushCadence) * time.Second)
+	}
+
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
 	http.HandleFunc("/ota", func(w http.ResponseWriter, r *http.Request) {
-		handleOTA(w, r, *root, *noParseVersion, *clientLog)
+		handleOTA(w, r, *root, *noParseVersion, clog)
 	})
 	http.HandleFunc("/clients", func(w http.ResponseWriter, r *http.Request) {
-		handleClients(w, *clientLog)
+		handleClients(w, clog)
 	})
 	http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
-		handleMetrics(w, *clientLog)
+		handleMetrics(w, clog)
 	})
 
 	addr := fmt.Sprintf(":%d", *port)
 	log.Printf("Listening on %s, root=%s, no-parse-version=%v", addr, *root, *noParseVersion)
-	log.Fatal(http.ListenAndServe(addr, nil))
+
+	srv := &http.Server{Addr: addr}
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		log.Println("Shutting down...")
+		if clog != nil {
+			clog.flush()
+		}
+		srv.Shutdown(context.Background())
+	}()
+
+	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+		log.Fatal(err)
+	}
 }
 
 var validMACRe = regexp.MustCompile(`^[0-9a-f:]+$`)
 var macHexRe = regexp.MustCompile(`[0-9a-f]{2}`)
 
-// sanitizeMAC validates and normalises a MAC to "aa-bb-cc-dd-ee-ff" format.
-// Returns the sanitised MAC and true, or empty string and false if invalid.
 func sanitizeMAC(raw string) (string, bool) {
 	s := strings.ToLower(raw)
 	if !validMACRe.MatchString(s) {
@@ -106,7 +130,7 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
-func handleOTA(w http.ResponseWriter, r *http.Request, root string, noParseVersion bool, clientLog string) {
+func handleOTA(w http.ResponseWriter, r *http.Request, root string, noParseVersion bool, clog *clientLog) {
 	ip := clientIP(r)
 
 	for name, values := range r.Header {
@@ -138,7 +162,9 @@ func handleOTA(w http.ResponseWriter, r *http.Request, root string, noParseVersi
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		log.Printf("[%s] Cannot read directory %s: %v", ip, dir, err)
-		writeClientLog(clientLog, sanitizedMAC, ip, version, "<NONE>")
+		if clog != nil {
+			clog.update(sanitizedMAC, ip, version, "<NONE>")
+		}
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
@@ -159,7 +185,9 @@ func handleOTA(w http.ResponseWriter, r *http.Request, root string, noParseVersi
 
 	if len(candidates) == 0 {
 		log.Printf("[%s] No update available (0 candidates)", ip)
-		writeClientLog(clientLog, sanitizedMAC, ip, version, "<NONE>")
+		if clog != nil {
+			clog.update(sanitizedMAC, ip, version, "<NONE>")
+		}
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
@@ -178,14 +206,18 @@ func handleOTA(w http.ResponseWriter, r *http.Request, root string, noParseVersi
 	if freeStr := r.Header.Get("x-ESP8266-free-space"); freeStr != "" {
 		if free, err := strconv.ParseInt(freeStr, 10, 64); err == nil && info.Size() >= free {
 			log.Printf("[%s] Not enough free space: need %d, have %d", ip, info.Size(), free)
-			writeClientLog(clientLog, sanitizedMAC, ip, version, selected)
+			if clog != nil {
+				clog.update(sanitizedMAC, ip, version, selected)
+			}
 			w.WriteHeader(http.StatusNotModified)
 			return
 		}
 	}
 
 	log.Printf("[%s] Selected update=%s, skipped=%d newer/%d older", ip, selected, len(candidates)-1, numOlder)
-	writeClientLog(clientLog, sanitizedMAC, ip, version, selected)
+	if clog != nil {
+		clog.update(sanitizedMAC, ip, version, selected)
+	}
 
 	f, err := os.Open(filePath)
 	if err != nil {
@@ -200,74 +232,12 @@ func handleOTA(w http.ResponseWriter, r *http.Request, root string, noParseVersi
 	http.ServeContent(w, r, selected, info.ModTime(), f)
 }
 
-// TSV columns: mac, callTime, ip, version, offered, failCount
+// clientLog holds client records in memory and flushes to disk periodically.
 
 var controlRe = regexp.MustCompile(`[\x00-\x1f\x7f]`)
 
 func stripControl(s string) string {
 	return controlRe.ReplaceAllString(s, "")
-}
-
-var clientLogMu sync.Mutex
-
-func writeClientLog(path, mac, ip, version, offered string) {
-	if path == "" {
-		return
-	}
-
-	clientLogMu.Lock()
-	defer clientLogMu.Unlock()
-
-	lines := map[string]string{}
-	var order []string
-
-	if f, err := os.Open(path); err == nil {
-		sc := bufio.NewScanner(f)
-		for sc.Scan() {
-			line := sc.Text()
-			if key, _, ok := strings.Cut(line, "\t"); ok && key != "" {
-				if _, exists := lines[key]; !exists {
-					order = append(order, key)
-				}
-				lines[key] = line
-			}
-		}
-		f.Close()
-	}
-
-	failCount := 0
-	if offered != "<NONE>" {
-		if prev, exists := lines[mac]; exists {
-			fields := strings.Split(prev, "\t")
-			// If previous version and offered match current, increment counter
-			if len(fields) >= 6 && stripControl(version) == fields[3] && offered == fields[4] {
-				failCount, _ = strconv.Atoi(fields[5])
-			}
-			failCount++
-		} else {
-			failCount = 1
-		}
-	}
-
-	now := time.Now().UTC().Format("20060102-150405")
-	newLine := strings.Join([]string{
-		mac, now, ip, stripControl(version), offered, strconv.Itoa(failCount),
-	}, "\t")
-
-	if _, exists := lines[mac]; !exists {
-		order = append(order, mac)
-	}
-	lines[mac] = newLine
-
-	var buf strings.Builder
-	for _, key := range order {
-		buf.WriteString(lines[key])
-		buf.WriteByte('\n')
-	}
-
-	if err := os.WriteFile(path, []byte(buf.String()), 0644); err != nil {
-		log.Printf("Failed to write client log: %v", err)
-	}
 }
 
 type clientRecord struct {
@@ -279,45 +249,132 @@ type clientRecord struct {
 	FailCount int
 }
 
-func readClientLog(path string) []clientRecord {
-	if path == "" {
-		return nil
-	}
-	clientLogMu.Lock()
-	defer clientLogMu.Unlock()
-
-	f, err := os.Open(path)
-	if err != nil {
-		return []clientRecord{}
-	}
-	defer f.Close()
-
-	var records []clientRecord
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		fields := strings.Split(sc.Text(), "\t")
-		if len(fields) < 5 {
-			continue
-		}
-		fc := 0
-		if len(fields) >= 6 {
-			fc, _ = strconv.Atoi(fields[5])
-		}
-		records = append(records, clientRecord{
-			MAC: fields[0], CallTime: fields[1], IP: fields[2],
-			Version: fields[3], Offered: fields[4], FailCount: fc,
-		})
-	}
-	return records
+func (r clientRecord) toTSV() string {
+	return strings.Join([]string{
+		r.MAC, r.CallTime, r.IP, r.Version, r.Offered, strconv.Itoa(r.FailCount),
+	}, "\t")
 }
 
-func handleClients(w http.ResponseWriter, clientLog string) {
-	records := readClientLog(clientLog)
-	if records == nil {
+func parseRecord(line string) (clientRecord, bool) {
+	fields := strings.Split(line, "\t")
+	if len(fields) < 5 {
+		return clientRecord{}, false
+	}
+	fc := 0
+	if len(fields) >= 6 {
+		fc, _ = strconv.Atoi(fields[5])
+	}
+	return clientRecord{
+		MAC: fields[0], CallTime: fields[1], IP: fields[2],
+		Version: fields[3], Offered: fields[4], FailCount: fc,
+	}, true
+}
+
+type clientLog struct {
+	path    string
+	mu      sync.Mutex
+	records map[string]clientRecord
+	order   []string
+	dirty   bool
+}
+
+func newClientLog(path string) *clientLog {
+	cl := &clientLog{
+		path:    path,
+		records: make(map[string]clientRecord),
+	}
+	cl.loadFromDisk()
+	return cl
+}
+
+func (cl *clientLog) loadFromDisk() {
+	f, err := os.Open(cl.path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		if rec, ok := parseRecord(sc.Text()); ok {
+			if _, exists := cl.records[rec.MAC]; !exists {
+				cl.order = append(cl.order, rec.MAC)
+			}
+			cl.records[rec.MAC] = rec
+		}
+	}
+}
+
+func (cl *clientLog) update(mac, ip, version, offered string) {
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+
+	failCount := 0
+	cleanVersion := stripControl(version)
+	if offered != "<NONE>" {
+		if prev, exists := cl.records[mac]; exists {
+			if prev.Version == cleanVersion && prev.Offered == offered {
+				failCount = prev.FailCount
+			}
+			failCount++
+		} else {
+			failCount = 1
+		}
+	}
+
+	if _, exists := cl.records[mac]; !exists {
+		cl.order = append(cl.order, mac)
+	}
+	cl.records[mac] = clientRecord{
+		MAC: mac, CallTime: time.Now().UTC().Format("20060102-150405"),
+		IP: ip, Version: cleanVersion, Offered: offered, FailCount: failCount,
+	}
+	cl.dirty = true
+}
+
+func (cl *clientLog) snapshot() []clientRecord {
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+	out := make([]clientRecord, 0, len(cl.order))
+	for _, key := range cl.order {
+		out = append(out, cl.records[key])
+	}
+	return out
+}
+
+func (cl *clientLog) flush() {
+	cl.mu.Lock()
+	if !cl.dirty {
+		cl.mu.Unlock()
+		return
+	}
+	var buf strings.Builder
+	for _, key := range cl.order {
+		buf.WriteString(cl.records[key].toTSV())
+		buf.WriteByte('\n')
+	}
+	cl.dirty = false
+	cl.mu.Unlock()
+
+	if err := os.WriteFile(cl.path, []byte(buf.String()), 0644); err != nil {
+		log.Printf("Failed to write client log: %v", err)
+	}
+}
+
+func (cl *clientLog) flushLoop(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for range ticker.C {
+		cl.flush()
+	}
+}
+
+func handleClients(w http.ResponseWriter, clog *clientLog) {
+	if clog == nil {
 		http.Error(w, "Client log not configured", http.StatusServiceUnavailable)
 		return
 	}
 
+	records := clog.snapshot()
 	sort.Slice(records, func(i, j int) bool {
 		return records[i].CallTime > records[j].CallTime
 	})
@@ -342,13 +399,13 @@ func escHTML(s string) string {
 	return s
 }
 
-func handleMetrics(w http.ResponseWriter, clientLog string) {
-	records := readClientLog(clientLog)
-	if records == nil {
+func handleMetrics(w http.ResponseWriter, clog *clientLog) {
+	if clog == nil {
 		http.Error(w, "Client log not configured", http.StatusServiceUnavailable)
 		return
 	}
 
+	records := clog.snapshot()
 	cutoff := time.Now().UTC().AddDate(0, 0, -30).Format("20060102-150405")
 
 	total, offered, upToDate, failing := 0, 0, 0, 0
@@ -369,9 +426,9 @@ func handleMetrics(w http.ResponseWriter, clientLog string) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]int{
-		"total_clients":          total,
-		"offered_update":         offered,
-		"up_to_date":             upToDate,
-		"apparently_failing":     failing,
+		"total_clients":      total,
+		"offered_update":     offered,
+		"up_to_date":         upToDate,
+		"apparently_failing": failing,
 	})
 }
