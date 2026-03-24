@@ -215,6 +215,32 @@ func TestHandleOTA_ServesUpdate(t *testing.T) {
 	}
 }
 
+func TestHandleOTA_NotEnoughSpace(t *testing.T) {
+	root := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "clients.tsv")
+	macDir := filepath.Join(root, "aa-bb-cc-dd-ee-ff")
+	os.MkdirAll(macDir, 0755)
+	os.WriteFile(filepath.Join(macDir, "20260322-180000.bin"), []byte("firmware"), 0644) // 8 bytes
+
+	r := httptest.NewRequest("GET", "/ota", nil)
+	r.Header.Set("x-ESP8266-STA-MAC", "AA:BB:CC:DD:EE:FF")
+	r.Header.Set("x-ESP8266-version", "|D:Mar 21 2026|T:18:00:00|")
+	r.Header.Set("x-ESP8266-free-space", "5") // less than 8
+	w := httptest.NewRecorder()
+	handleOTA(w, r, root, false, logPath)
+	if w.Code != http.StatusNotModified {
+		t.Errorf("expected 304, got %d", w.Code)
+	}
+	// Verify fail count was incremented
+	records := readClientLog(logPath)
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(records))
+	}
+	if records[0].FailCount != 1 {
+		t.Errorf("failCount = %d, want 1", records[0].FailCount)
+	}
+}
+
 func TestHandleOTA_NoUpdate(t *testing.T) {
 	root := t.TempDir()
 	macDir := filepath.Join(root, "aa-bb-cc-dd-ee-ff")

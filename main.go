@@ -166,10 +166,27 @@ func handleOTA(w http.ResponseWriter, r *http.Request, root string, noParseVersi
 
 	sort.Strings(candidates)
 	selected := candidates[0]
+
+	filePath := filepath.Join(dir, selected)
+	info, err := os.Stat(filePath)
+	if err != nil {
+		log.Printf("[%s] Cannot stat %s: %v", ip, filePath, err)
+		http.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
+
+	if freeStr := r.Header.Get("x-ESP8266-free-space"); freeStr != "" {
+		if free, err := strconv.ParseInt(freeStr, 10, 64); err == nil && info.Size() >= free {
+			log.Printf("[%s] Not enough free space: need %d, have %d", ip, info.Size(), free)
+			writeClientLog(clientLog, sanitizedMAC, ip, version, selected)
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+	}
+
 	log.Printf("[%s] Selected update=%s, skipped=%d newer/%d older", ip, selected, len(candidates)-1, numOlder)
 	writeClientLog(clientLog, sanitizedMAC, ip, version, selected)
 
-	filePath := filepath.Join(dir, selected)
 	f, err := os.Open(filePath)
 	if err != nil {
 		log.Printf("[%s] Cannot open %s: %v", ip, filePath, err)
@@ -177,13 +194,6 @@ func handleOTA(w http.ResponseWriter, r *http.Request, root string, noParseVersi
 		return
 	}
 	defer f.Close()
-
-	info, err := f.Stat()
-	if err != nil {
-		log.Printf("[%s] Cannot stat %s: %v", ip, filePath, err)
-		http.Error(w, "Internal error", http.StatusInternalServerError)
-		return
-	}
 
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", info.Size()))
