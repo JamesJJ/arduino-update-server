@@ -21,13 +21,21 @@ import (
 	"time"
 )
 
+var version = "dev"
+
 func main() {
+	showVersion := flag.Bool("version", false, "Print version and exit")
 	port := flag.Int("port", 8080, "HTTP port to listen on")
 	root := flag.String("root", "", "Root directory for firmware files (required)")
 	noParseVersion := flag.Bool("no-parse-version", false, "Disable parsing version from __DATE__ __TIME__ format")
 	clientLogPath := flag.String("client-log", "", "Path to client log file")
 	flushCadence := flag.Int("flush-log-cadence", 60, "Seconds between client log flushes to disk")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(version)
+		os.Exit(0)
+	}
 
 	if *root == "" {
 		fmt.Fprintln(os.Stderr, "Error: --root is required")
@@ -55,7 +63,7 @@ func main() {
 	})
 
 	addr := fmt.Sprintf(":%d", *port)
-	log.Printf("Listening on %s, root=%s, no-parse-version=%v", addr, *root, *noParseVersion)
+	log.Printf("version=%s, listening on %s, root=%s, no-parse-version=%v", version, addr, *root, *noParseVersion)
 
 	srv := &http.Server{Addr: addr}
 

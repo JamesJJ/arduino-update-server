@@ -31,8 +31,9 @@ jobs:
 
       - name: Build binaries
         run: |
-          GOOS=linux GOARCH=amd64 go build -o arduino-update-server-linux-amd64
-          GOOS=linux GOARCH=arm64 go build -o arduino-update-server-linux-arm64
+          LDFLAGS="-X main.version=${{ steps.tag.outputs.tag }}"
+          GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS" -o arduino-update-server-linux-amd64
+          GOOS=linux GOARCH=arm64 go build -ldflags "$LDFLAGS" -o arduino-update-server-linux-arm64
 
       - name: Create tag and release
         env:
