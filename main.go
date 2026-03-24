@@ -67,7 +67,9 @@ func main() {
 		if clog != nil {
 			clog.flush()
 		}
-		srv.Shutdown(context.Background())
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		srv.Shutdown(ctx)
 	}()
 
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
