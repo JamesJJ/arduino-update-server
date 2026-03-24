@@ -178,6 +178,7 @@ func TestHandleOTA_MissingHeaders(t *testing.T) {
 func TestHandleOTA_InvalidMAC(t *testing.T) {
 	r := httptest.NewRequest("GET", "/ota", nil)
 	r.Header.Set("x-ESP8266-STA-MAC", "ZZZZZZZZZZZZ")
+	r.Header.Set("x-ESP8266-mode", "sketch")
 	r.Header.Set("x-ESP8266-version", "v1")
 	w := httptest.NewRecorder()
 	handleOTA(w, r, t.TempDir(), true, nil)
@@ -189,6 +190,7 @@ func TestHandleOTA_InvalidMAC(t *testing.T) {
 func TestHandleOTA_NoDirectory(t *testing.T) {
 	r := httptest.NewRequest("GET", "/ota", nil)
 	r.Header.Set("x-ESP8266-STA-MAC", "AA:BB:CC:DD:EE:FF")
+	r.Header.Set("x-ESP8266-mode", "sketch")
 	r.Header.Set("x-ESP8266-version", "v1")
 	w := httptest.NewRecorder()
 	handleOTA(w, r, t.TempDir(), true, nil)
@@ -205,6 +207,7 @@ func TestHandleOTA_ServesUpdate(t *testing.T) {
 
 	r := httptest.NewRequest("GET", "/ota", nil)
 	r.Header.Set("x-ESP8266-STA-MAC", "AA:BB:CC:DD:EE:FF")
+	r.Header.Set("x-ESP8266-mode", "sketch")
 	r.Header.Set("x-ESP8266-version", "|D:Mar 21 2026|T:18:00:00|")
 	w := httptest.NewRecorder()
 	handleOTA(w, r, root, false, nil)
@@ -225,6 +228,7 @@ func TestHandleOTA_NotEnoughSpace(t *testing.T) {
 
 	r := httptest.NewRequest("GET", "/ota", nil)
 	r.Header.Set("x-ESP8266-STA-MAC", "AA:BB:CC:DD:EE:FF")
+	r.Header.Set("x-ESP8266-mode", "sketch")
 	r.Header.Set("x-ESP8266-version", "|D:Mar 21 2026|T:18:00:00|")
 	r.Header.Set("x-ESP8266-free-space", "5")
 	w := httptest.NewRecorder()
@@ -246,6 +250,7 @@ func TestHandleOTA_NoUpdate(t *testing.T) {
 
 	r := httptest.NewRequest("GET", "/ota", nil)
 	r.Header.Set("x-ESP8266-STA-MAC", "AA:BB:CC:DD:EE:FF")
+	r.Header.Set("x-ESP8266-mode", "sketch")
 	r.Header.Set("x-ESP8266-version", "|D:Mar 21 2026|T:18:00:00|")
 	w := httptest.NewRecorder()
 	handleOTA(w, r, root, false, nil)

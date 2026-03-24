@@ -150,6 +150,12 @@ func handleOTA(w http.ResponseWriter, r *http.Request, root string, noParseVersi
 		return
 	}
 
+	if r.Header.Get("x-ESP8266-mode") != "sketch" {
+		log.Printf("[%s] Invalid or missing x-ESP8266-mode header", ip)
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+
 	sanitizedMAC, macOK := sanitizeMAC(mac)
 	if !macOK {
 		log.Printf("[%s] Invalid MAC address: %s", ip, mac)
