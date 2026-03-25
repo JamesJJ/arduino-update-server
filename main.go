@@ -140,17 +140,26 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
+// espHeader reads a header trying x-ESP8266- prefix first, then x-ESP32-.
+func espHeader(r *http.Request, suffix string) string {
+	if v := r.Header.Get("x-ESP8266-" + suffix); v != "" {
+		return v
+	}
+	return r.Header.Get("x-ESP32-" + suffix)
+}
+
 func handleOTA(w http.ResponseWriter, r *http.Request, root string, noParseVersion bool, clog *clientLog) {
 	ip := clientIP(r)
 
 	for name, values := range r.Header {
-		if strings.HasPrefix(strings.ToLower(name), "x-esp8266-") {
+		lower := strings.ToLower(name)
+		if strings.HasPrefix(lower, "x-esp8266-") || strings.HasPrefix(lower, "x-esp32-") {
 			log.Printf("[%s] Header %s: %s", ip, name, strings.Join(values, ", "))
 		}
 	}
 
-	mac := r.Header.Get("x-ESP8266-STA-MAC")
-	version := r.Header.Get("x-ESP8266-version")
+	mac := espHeader(r, "STA-MAC")
+	version := espHeader(r, "version")
 
 	if mac == "" || version == "" {
 		log.Printf("[%s] Missing required headers", ip)
@@ -158,8 +167,8 @@ func handleOTA(w http.ResponseWriter, r *http.Request, root string, noParseVersi
 		return
 	}
 
-	if r.Header.Get("x-ESP8266-mode") != "sketch" {
-		log.Printf("[%s] Invalid or missing x-ESP8266-mode header", ip)
+	if espHeader(r, "mode") != "sketch" {
+		log.Printf("[%s] Invalid or missing mode header", ip)
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
@@ -219,7 +228,7 @@ func handleOTA(w http.ResponseWriter, r *http.Request, root string, noParseVersi
 		return
 	}
 
-	if freeStr := r.Header.Get("x-ESP8266-free-space"); freeStr != "" {
+	if freeStr := espHeader(r, "free-space"); freeStr != "" {
 		if free, err := strconv.ParseInt(freeStr, 10, 64); err == nil && info.Size() >= free {
 			log.Printf("[%s] Not enough free space: need %d, have %d", ip, info.Size(), free)
 			if clog != nil {

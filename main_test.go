@@ -219,6 +219,26 @@ func TestHandleOTA_ServesUpdate(t *testing.T) {
 	}
 }
 
+func TestHandleOTA_ServesUpdate_ESP32(t *testing.T) {
+	root := t.TempDir()
+	macDir := filepath.Join(root, "aa-bb-cc-dd-ee-ff")
+	os.MkdirAll(macDir, 0755)
+	os.WriteFile(filepath.Join(macDir, "20260322-180000.bin"), []byte("firmware32"), 0644)
+
+	r := httptest.NewRequest("GET", "/ota", nil)
+	r.Header.Set("x-ESP32-STA-MAC", "AA:BB:CC:DD:EE:FF")
+	r.Header.Set("x-ESP32-mode", "sketch")
+	r.Header.Set("x-ESP32-version", "|D:Mar 21 2026|T:18:00:00|")
+	w := httptest.NewRecorder()
+	handleOTA(w, r, root, false, nil)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	if w.Body.String() != "firmware32" {
+		t.Errorf("unexpected body: %q", w.Body.String())
+	}
+}
+
 func TestHandleOTA_NotEnoughSpace(t *testing.T) {
 	root := t.TempDir()
 	clog := newTestClientLog(t)
@@ -231,6 +251,29 @@ func TestHandleOTA_NotEnoughSpace(t *testing.T) {
 	r.Header.Set("x-ESP8266-mode", "sketch")
 	r.Header.Set("x-ESP8266-version", "|D:Mar 21 2026|T:18:00:00|")
 	r.Header.Set("x-ESP8266-free-space", "5")
+	w := httptest.NewRecorder()
+	handleOTA(w, r, root, false, clog)
+	if w.Code != http.StatusNotModified {
+		t.Errorf("expected 304, got %d", w.Code)
+	}
+	records := clog.snapshot()
+	if len(records) != 1 || records[0].FailCount != 1 {
+		t.Errorf("expected failCount=1, got %+v", records)
+	}
+}
+
+func TestHandleOTA_NotEnoughSpace_ESP32(t *testing.T) {
+	root := t.TempDir()
+	clog := newTestClientLog(t)
+	macDir := filepath.Join(root, "aa-bb-cc-dd-ee-ff")
+	os.MkdirAll(macDir, 0755)
+	os.WriteFile(filepath.Join(macDir, "20260322-180000.bin"), []byte("firmware"), 0644)
+
+	r := httptest.NewRequest("GET", "/ota", nil)
+	r.Header.Set("x-ESP32-STA-MAC", "AA:BB:CC:DD:EE:FF")
+	r.Header.Set("x-ESP32-mode", "sketch")
+	r.Header.Set("x-ESP32-version", "|D:Mar 21 2026|T:18:00:00|")
+	r.Header.Set("x-ESP32-free-space", "5")
 	w := httptest.NewRecorder()
 	handleOTA(w, r, root, false, clog)
 	if w.Code != http.StatusNotModified {
